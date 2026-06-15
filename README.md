@@ -4,9 +4,6 @@
 > 北京林业大学 · 信息学院 · 《软件工程》课程  
 > 班级：计算机232 | 学号：231002205 | 姓名：谷钰
 
-[![CI](https://github.com/nekocafe/nekocafe-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/nekocafe/nekocafe-platform/actions/workflows/ci.yml)
-[![CD](https://github.com/nekocafe/nekocafe-platform/actions/workflows/cd.yml/badge.svg)](https://github.com/nekocafe/nekocafe-platform/actions/workflows/cd.yml)
-
 ---
 
 ## 📋 项目概览
@@ -163,4 +160,4 @@ Deploy Dev → Smoke Test → Deploy Staging → E2E Test → Deploy Prod Canary
 
 - 作者：谷钰 (计算机232 · 231002205)
 - 课程：《软件工程》2026 春季学期
-- 仓库：https://github.com/nekocafe/nekocafe-platform
+- 仓库：https://github.com/gy-0503/-
