@@ -1,0 +1,178 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [dev, staging, production]
+      canary_percentage:
+        description: 'Canary traffic percentage (prod only)'
+        required: false
+        type: number
+        default: 20
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ===== Deploy to Dev =====
+  deploy-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: v3.14.0
+      - name: Deploy to dev
+        run: |
+          helm upgrade --install nekocafe-dev ./helm \
+            -f ./helm/values.yaml \
+            -f ./helm/values-dev.yaml \
+            --set image.tag=${{ github.sha }} \
+            --namespace dev --create-namespace \
+            --wait --timeout 5m
+
+  # ===== Smoke Test =====
+  smoke-test:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Health check
+        run: |
+          for i in {1..30}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/actuator/health || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Service healthy"
+              exit 0
+            fi
+            echo "Waiting... attempt $i/30 (status: $STATUS)"
+            sleep 5
+          done
+          echo "❌ Service failed to start"
+          exit 1
+
+  # ===== Deploy to Staging =====
+  deploy-staging:
+    needs: smoke-test
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to staging
+        run: |
+          helm upgrade --install nekocafe-staging ./helm \
+            -f ./helm/values.yaml \
+            -f ./helm/values-staging.yaml \
+            --set image.tag=${{ github.sha }} \
+            --namespace staging --create-namespace \
+            --wait --timeout 5m
+
+  # ===== E2E Test =====
+  e2e-test:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Run E2E tests
+        run: |
+          npx playwright test tests/e2e/ --reporter=html
+      - name: Upload E2E report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report
+          path: playwright-report/
+
+  # ===== Deploy Production Canary =====
+  deploy-prod-canary:
+    needs: e2e-test
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.nekocafe.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy canary (5% traffic)
+        run: |
+          # Deploy canary with 1 replica vs stable 4 replicas = 20% traffic
+          helm upgrade --install nekocafe-prod-canary ./helm \
+            -f ./helm/values.yaml \
+            -f ./helm/values-prod.yaml \
+            --set image.tag=${{ github.sha }} \
+            --set canary.enabled=true \
+            --set canary.replicas=1 \
+            --set stable.replicas=4 \
+            --namespace production --create-namespace \
+            --wait --timeout 5m
+
+  # ===== Monitor Canary =====
+  monitor-canary:
+    needs: deploy-prod-canary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Monitor for 10 minutes
+        run: |
+          echo "🔍 Monitoring canary deployment..."
+          for i in {1..20}; do
+            sleep 30
+            # Check error rate
+            ERROR_RATE=$(curl -s "http://prometheus:9090/api/v1/query?query=rate(http_requests_total{namespace='production',status=~'5..'}[5m])/rate(http_requests_total{namespace='production'}[5m])" | jq -r '.data.result[0].value[1] // "0"')
+            echo "  [$i/20] Error rate: $ERROR_RATE"
+            if (( $(echo "$ERROR_RATE > 0.01" | bc -l) )); then
+              echo "❌ Error rate exceeded 1% threshold! Triggering rollback..."
+              exit 1
+            fi
+          done
+          echo "✅ Canary healthy after 10 minutes"
+
+  # ===== Auto Rollback on Failure =====
+  rollback:
+    needs: monitor-canary
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto rollback
+        run: |
+          echo "🚨 Initiating automatic rollback..."
+          helm rollback nekocafe-prod-canary --namespace production
+          echo "✅ Rolled back to previous stable revision"
+
+  # ===== Full Production Deployment =====
+  deploy-prod-full:
+    needs: monitor-canary
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy 100% traffic
+        run: |
+          helm upgrade --install nekocafe-prod ./helm \
+            -f ./helm/values.yaml \
+            -f ./helm/values-prod.yaml \
+            --set image.tag=${{ github.sha }} \
+            --set canary.enabled=false \
+            --set replicas=3 \
+            --namespace production --create-namespace \
+            --wait --timeout 5m
+
+  # ===== Tag Release =====
+  tag-release:
+    needs: deploy-prod-full
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Git Tag
+        run: |
+          git tag release-$(date +%Y%m%d-%H%M%S)
+          git push origin --tags
