@@ -29,8 +29,7 @@
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/nekocafe/nekocafe-platform.git
-cd nekocafe-platform
+git clone https://github.com/gy-0503/-.git
 
 # 2. 一键启动全部服务
 make up
